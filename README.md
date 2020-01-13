@@ -3,4 +3,4 @@ This project is about PPO, an-policy reinforcement learning algorithm which was 
 
 
 ## Demo
-![Alt Text](https://media.giphy.com/media/vFKqnCdLPNOKc/giphy.gif)
+![Alt Text](https://github.com/oluwayetty/hopper_ppo/blob/master/hopper.gif)
