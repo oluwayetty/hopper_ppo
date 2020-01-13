@@ -9,28 +9,29 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.distributions import Normal
+# import torch.distributions.kl.kl_divergence as kl
 from tensorboardX import SummaryWriter
 from lib.common import mkdir
 from lib.model import ActorCritic
 from lib.multiprocessing_env import SubprocVecEnv
 
 
-NUM_ENVS            = 8 #num of parallel envs
+NUM_ENVS            = 8 #num of parallel envs to generate the training data
 ENV_ID              = "Hopper-v3"
-HIDDEN_SIZE         = 64
-LEARNING_RATE       = 1e-3
-GAMMA               = 0.99 #discount factor
-GAE_LAMBDA          = 0.95 #smoothing factor
-PPO_EPSILON         = 0.2 #clip of the ratio
-CRITIC_DISCOUNT     = 0.5 # loss tends be bigger than actor, so we scale it down
-ENTROPY_BETA        = 0.001 # the amount of imporatence to give to the entropy bonus which helps exploration
+HIDDEN_SIZE         = 64 # for actor critic network
+LEARNING_RATE       = 1e-3 #for Adam optimizer
+GAMMA               = 0.99 #discount factor for delta in GAE Algorithm
+GAE_LAMBDA          = 0.95 #smoothing factor for GAE
+PPO_EPSILON         = 0.2 #clip of the ratio between the new and old policy
+CRITIC_DISCOUNT     = 0.3 # critic loss tends to be bigger than actor loss, so we scale it down
+ENTROPY_BETA        = 0.001 # the amount of imporatance to give to the entropy bonus which helps exploration
+KL_BETA             = 1.0 #fixed penalty coefficient for KL divergence
 '''
 # number of transitions we sample for each training iteration, each step
 collects a transitoins from each parallel env, hence total amount of data
 collected = N_envs * PPOsteps --> buffer of 2048 data samples to train on
 '''
-PPO_STEPS           = 256
+PPO_STEPS           = 256 #num of transitions we sample for each training iterations
 MINI_BATCH_SIZE     = 64 # num of samples that are randomly  selected from the total amount of stored data
 '''one epoch means one PPO-epochs -- one epoch means one pass over the entire buffer of training data.
 So if one buffer has 2048 transitions and mini-batch-size is 64, then one epoch would be 32 selected mini batches.
@@ -38,7 +39,7 @@ So if one buffer has 2048 transitions and mini-batch-size is 64, then one epoch 
 PPO_EPOCHS          = 10 # how many times we propagate the network over the entire buffer of training data
 TEST_EPOCHS         = 10 # how often we run tests to eval our network, one epoch is one entire ppo update cycle
 NUM_TESTS           = 10 # num of tests we run to average the total rewards, each time we want eval the performance of the network
-TARGET_REWARD       = 3000
+TARGET_REWARD       = 2000
 
 def make_env():
     ''' returns a function which creates a single environment '''
@@ -61,9 +62,9 @@ def test_env(env, model, device, deterministic=True):
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
         dist, _ = model(state)
-        #continous action space instead of sampling based on the mean and stdf, we use means
-        action = dist.mean.detach().cpu().numpy()[0] if deterministic \
-            else dist.sample().cpu().numpy()[0]
+
+        #continous action space instead of sampling based on the mean and stdf, we use mean
+        action = dist.mean.detach().cpu().numpy()[0] if deterministic else dist.sample().cpu().numpy()[0]
         next_state, reward, done, _ = env.step(action)
         state = next_state
         total_reward += reward
@@ -74,7 +75,6 @@ def normalize(x):
     x -= x.mean()
     x /= (x.std() + 1e-8)
     return x
-
 
 def compute_gae(next_value, rewards, masks, values, gamma=GAMMA, lam=GAE_LAMBDA):
     '''
@@ -102,7 +102,7 @@ def ppo_iter(states, actions, log_probs, returns, advantage):
         yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantage[rand_ids, :]
 
 
-def ppo_update(frame_idx, states, actions, log_probs, returns, advantages, clip_param=PPO_EPSILON):
+def ppo_update(frame_idx, states, actions, log_probs, returns, advantages, clip_param=PPO_EPSILON, kl_coeff=KL_BETA):
     count_steps = 0
     sum_returns = 0.0
     sum_advantage = 0.0
@@ -122,14 +122,18 @@ def ppo_update(frame_idx, states, actions, log_probs, returns, advantages, clip_
 
             # SURROGAGE POLICY LOSS in log space
             # A long trajectory of experiences is collected at each update cycle
-            ratio = (new_log_probs - old_log_probs).exp()
+            ratio = torch.exp(new_log_probs - old_log_probs)
             surr1 = ratio * advantage
             surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
 
-            actor_loss  = - torch.min(surr1, surr2).mean()
-            critic_loss = (return_ - value).pow(2).mean()
+            # common trick when minimizing a loss function which returns a +ve number.if the loss returns 8, it becomes -8.
+            actor_loss  = -torch.min(surr1, surr2).mean() #clipped version
+            # actor_loss  = -surr1.mean() #no clipping or penalty
+            # actor_loss  = -surr1.mean() - (kl_coeff * F.kl_div(input=old_log_probs, target=new_log_probs, reduction='batchmean')) #Fixed KL divergence
+
             #Mean squared error between the actual GAE returns
             #and network estimated value of the state
+            critic_loss = (return_ - value).pow(2).mean()
 
             loss = CRITIC_DISCOUNT * critic_loss + actor_loss - ENTROPY_BETA * entropy
             #from paper
@@ -146,15 +150,14 @@ def ppo_update(frame_idx, states, actions, log_probs, returns, advantages, clip_
             sum_loss_critic += critic_loss
             sum_loss_total += loss
             sum_entropy += entropy
-
             count_steps += 1
 
     writer.add_scalar("returns", sum_returns / count_steps, frame_idx)
     writer.add_scalar("advantage", sum_advantage / count_steps, frame_idx)
     writer.add_scalar("loss_actor", sum_loss_actor / count_steps, frame_idx)
     writer.add_scalar("loss_critic", sum_loss_critic / count_steps, frame_idx)
-    writer.add_scalar("entropy", sum_entropy / count_steps, frame_idx)
     writer.add_scalar("loss_total", sum_loss_total / count_steps, frame_idx)
+    writer.add_scalar("entropy", sum_entropy / count_steps, frame_idx)
 
 
 if __name__ == "__main__":
@@ -162,7 +165,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-n", "--name", default=ENV_ID, help="Name of the run")
     args = parser.parse_args()
-    # import ipdb; ipdb.set_trace()
     # writer = SummaryWriter(comment="ppo_" + args.name)
     writer = SummaryWriter("logs-{}".format(args.name))
 
@@ -206,6 +208,7 @@ if __name__ == "__main__":
             dist, value = model(state)
 
             action = dist.sample()
+
             # each state, reward, done is a list of results from each parallel environment
             next_state, reward, done, _ = envs.step(action.cpu().numpy()) # really a lists of state foe each env
             log_prob = dist.log_prob(action) #pass through the network
@@ -245,8 +248,9 @@ if __name__ == "__main__":
         if train_epoch % TEST_EPOCHS == 0: #one test epoch is one entire update operation
             #every few epochs we run a series of tests and average the rewards to see the agents performance
             test_reward = np.mean([test_env(env, model, device) for _ in range(NUM_TESTS)])
-            # writer.add_scalar("test_rewards", test_reward, frame_idx)
+            writer.add_scalar("test_rewards", test_reward, frame_idx)
             print('Frame %s. reward: %s' % (frame_idx, test_reward))
+
             # Save a checkpoint every time we achieve a best reward
             if best_reward is None or best_reward < test_reward:
                 if best_reward is not None:
@@ -256,5 +260,4 @@ if __name__ == "__main__":
                     print(fname)
                     torch.save(model, fname)
                 best_reward = test_reward
-            if test_reward > TARGET_REWARD:
-                early_stop = True
+            if test_reward > TARGET_REWARD: early_stop = True
