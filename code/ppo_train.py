@@ -9,34 +9,33 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-# import torch.distributions.kl.kl_divergence as kl
 from tensorboardX import SummaryWriter
 from lib.common import mkdir
 from lib.model import ActorCritic
 from lib.multiprocessing_env import SubprocVecEnv
 
 
-NUM_ENVS            = 8 #num of parallel envs to generate the training data
+NUM_ENVS            = 16 #num of parallel envs to generate the training data
 ENV_ID              = "Hopper-v3"
 HIDDEN_SIZE         = 64 # for actor critic network
 LEARNING_RATE       = 1e-3 #for Adam optimizer
 GAMMA               = 0.99 #discount factor for delta in GAE Algorithm
 GAE_LAMBDA          = 0.95 #smoothing factor for GAE
 PPO_EPSILON         = 0.2 #clip of the ratio between the new and old policy
-CRITIC_DISCOUNT     = 0.3 # critic loss tends to be bigger than actor loss, so we scale it down
-ENTROPY_BETA        = 0.001 # the amount of imporatance to give to the entropy bonus which helps exploration
+CRITIC_DISCOUNT     = 0.5 # critic loss tends to be bigger than actor loss, so we scale it down
+ENTROPY_BETA        = 0.01 # the amount of imporatance to give to the entropy bonus which helps exploration
 KL_BETA             = 1.0 #fixed penalty coefficient for KL divergence
 '''
 # number of transitions we sample for each training iteration, each step
 collects a transitoins from each parallel env, hence total amount of data
 collected = N_envs * PPOsteps --> buffer of 2048 data samples to train on
 '''
-PPO_STEPS           = 256 #num of transitions we sample for each training iterations
-MINI_BATCH_SIZE     = 64 # num of samples that are randomly  selected from the total amount of stored data
+PPO_STEPS           = 512 #num of transitions we sample for each training iterations
+MINI_BATCH_SIZE     = 128 # num of samples that are randomly  selected from the total amount of stored data
 '''one epoch means one PPO-epochs -- one epoch means one pass over the entire buffer of training data.
 So if one buffer has 2048 transitions and mini-batch-size is 64, then one epoch would be 32 selected mini batches.
 '''
-PPO_EPOCHS          = 10 # how many times we propagate the network over the entire buffer of training data
+PPO_EPOCHS          = 15 # how many times we propagate the network over the entire buffer of training data
 TEST_EPOCHS         = 10 # how often we run tests to eval our network, one epoch is one entire ppo update cycle
 NUM_TESTS           = 10 # num of tests we run to average the total rewards, each time we want eval the performance of the network
 TARGET_REWARD       = 2000
